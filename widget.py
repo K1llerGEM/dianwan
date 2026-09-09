@@ -7,12 +7,12 @@ import calendar as cal
 from datetime import datetime, timedelta
 import tkinter as tk
 from tkinter import ttk
-from main import update_data
+from main import update_data, DB_PATH, DATA_DIR
 
 # ---------- 配置 ----------
-SETTINGS_FILE = "settings.json"
+SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 PAGE_SIZE = 10
-ROW_H = 48                          # 每行高度
+ROW_H = 48
 BG_COLOR = "#1E1E2E"
 ACTIVE_BG = "#4A4A6A"
 CARD_BG = "#26263A"
@@ -132,10 +132,10 @@ bar.bind("<ButtonRelease-1>", stop_move)
 state = {"date": datetime.now().strftime("%Y-%m-%d"), "page": 0, "total_pages": 1}
 
 today = datetime.now()
-week_start = today - timedelta(days=today.weekday())          # 本周周一
+week_start = today - timedelta(days=today.weekday())
 week_dates = [week_start + timedelta(days=i) for i in range(7)]
 
-# ---------- 周一~周日（本周快捷切换）+ 日历按钮 ----------
+# ---------- 周一~周日 + 日历按钮 ----------
 week_frame = tk.Frame(root, bg=BG)
 week_frame.pack(fill="x", padx=10, pady=(8, 2))
 
@@ -162,10 +162,9 @@ cal_btn = tk.Button(week_frame, text="日\n历", command=lambda: open_calendar()
                     borderwidth=0, highlightthickness=0)
 cal_btn.pack(side="left", padx=(2, 0))
 
-# 本周哪天有发售，对应按钮标绿
 def refresh_week_btns():
     try:
-        conn = sqlite3.connect("games.db", timeout=10)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         rows = conn.execute(
             "SELECT DISTINCT date FROM games WHERE date >= ? AND date <= ?",
             (week_start.strftime("%Y-%m-%d"),
@@ -188,13 +187,13 @@ date_label = tk.Label(root, text=f"正在看：{state['date']}", bg=BG, fg=TEXT_
                       font=("Microsoft YaHei", 9))
 date_label.pack(pady=(2, 2))
 
-# ---------- 游戏列表（Canvas 绘制：名字左、价格右、行间分割线） ----------
+# ---------- 游戏列表（Canvas） ----------
 list_canvas = tk.Canvas(root, bg="#1A1A2A", highlightthickness=0, bd=0)
 list_canvas.pack(fill="both", expand=True, padx=10, pady=6)
 
-row_urls = {}        # 页内行号 -> 商店 url
-sel_index = -1       # 当前选中的行（页内）
-cur_rows = []        # 当前页数据，用于重绘
+row_urls = {}
+sel_index = -1
+cur_rows = []
 cur_base = 0
 
 def draw_list():
@@ -227,7 +226,6 @@ def draw_list():
         list_canvas.create_text(cw - 10, y0 + ROW_H // 2, anchor="e",
                                 text=p, fill=p_color,
                                 font=("Microsoft YaHei", 11, "bold"))
-        # 行间分割线
         list_canvas.create_line(6, y1 - 1, cw - 6, y1 - 1, fill="#2E2E42")
         row_urls[i] = url
 
@@ -256,7 +254,7 @@ def load_page():
     sel_index = -1
     cur_rows = []
     d = state["date"]
-    conn = sqlite3.connect("games.db", timeout=10)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     try:
         total = conn.execute("SELECT COUNT(*) FROM games WHERE date = ?",
                              (d,)).fetchone()[0]
@@ -264,7 +262,7 @@ def load_page():
         list_canvas.delete("all")
         page_label.config(text="…")
         conn.close()
-        state["date"] = ""   # 标记"还没数据"，draw_list 显示下载中
+        state["date"] = ""
         draw_list()
         return
     state["total_pages"] = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -322,7 +320,7 @@ load_bar = ttk.Progressbar(status_frame, style="Dark.Horizontal.TProgressbar",
 load_bar.pack(side="right", pady=4)
 load_bar.start(15)
 
-# ---------- 日历弹窗（月 + 年切换） ----------
+# ---------- 日历弹窗 ----------
 def open_calendar():
     pop = tk.Toplevel(root)
     pop.overrideredirect(True)
@@ -409,7 +407,7 @@ def open_calendar():
             w.destroy()
         year_label.config(text=f"{cur['y']} 年")
         month_label.config(text=f"{cur['m']} 月")
-        conn = sqlite3.connect("games.db", timeout=10)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         try:
             has_games = set(r[0] for r in conn.execute(
                 "SELECT DISTINCT date FROM games WHERE date LIKE ?",
@@ -442,7 +440,7 @@ def open_calendar():
 
     build()
 
-# ---------- 启动：先显示旧数据，后台线程更新 ----------
+# ---------- 启动 ----------
 load_page()
 root.update()
 
