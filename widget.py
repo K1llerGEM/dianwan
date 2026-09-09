@@ -1,11 +1,14 @@
 import json
 import os
+import sys
+import shutil
 import sqlite3
 import threading
 import ctypes
 import calendar as cal
 from datetime import datetime, timedelta
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 from main import update_data, DB_PATH, DATA_DIR
 
@@ -23,6 +26,26 @@ BAR_BG = "#1E1E2E"
 SENTINEL = "#010203"
 WEEK_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 HAS_GAME_BG = "#2E5E4E"
+
+SOURCE_NAMES = {"steam": "Steam", "3dm": "3DM", "gamersky": "游民"}
+SOURCE_COLORS = {
+    "steam":    "#7EB3E0",
+    "3dm":      "#E8A15C",
+    "gamersky": "#9AD1A6",
+}
+
+# ---------- 种子数据 ----------
+def ensure_seed_db():
+    try:
+        if os.path.exists(DB_PATH):
+            return
+        bundled = os.path.join(getattr(sys, "_MEIPASS", ""), "games.db")
+        if bundled and os.path.exists(bundled):
+            shutil.copy(bundled, DB_PATH)
+    except Exception:
+        pass
+
+ensure_seed_db()
 
 # ---------- 毛玻璃 ----------
 def enable_acrylic(hwnd):
@@ -63,7 +86,7 @@ settings = load_settings()
 root = tk.Tk()
 root.overrideredirect(True)
 root.title("电玩之道")
-WIN_W, WIN_H = 440, 650
+WIN_W, WIN_H = 440, 680
 root.geometry(f"{WIN_W}x{WIN_H}+{settings.get('x', 100)}+{settings.get('y', 100)}")
 
 pinned = settings.get("pinned", True)
@@ -129,7 +152,9 @@ bar.bind("<B1-Motion>", on_move)
 bar.bind("<ButtonRelease-1>", stop_move)
 
 # ---------- 数据状态 ----------
-state = {"date": datetime.now().strftime("%Y-%m-%d"), "page": 0, "total_pages": 1}
+state = {"date": datetime.now().strftime("%Y-%m-%d"),
+         "page": 0, "total_pages": 1,
+         "mode": "date", "keyword": ""}
 
 today = datetime.now()
 week_start = today - timedelta(days=today.weekday())
@@ -142,6 +167,8 @@ week_frame.pack(fill="x", padx=10, pady=(8, 2))
 week_btns = []
 
 def select_weekday(i):
+    state["mode"] = "date"
+    state["keyword"] = ""
     state["date"] = week_dates[i].strftime("%Y-%m-%d")
     state["page"] = 0
     date_label.config(text=f"正在看：{state['date']}")
@@ -187,7 +214,50 @@ date_label = tk.Label(root, text=f"正在看：{state['date']}", bg=BG, fg=TEXT_
                       font=("Microsoft YaHei", 9))
 date_label.pack(pady=(2, 2))
 
-# ---------- 游戏列表（Canvas） ----------
+# ---------- 搜索框 ----------
+search_frame = tk.Frame(root, bg=BG)
+search_frame.pack(fill="x", padx=10, pady=(0, 4))
+
+search_entry = tk.Entry(search_frame, bg="#1A1A2A", fg=TEXT_WHITE,
+                        insertbackground=TEXT_WHITE, relief="flat",
+                        font=("Microsoft YaHei", 10),
+                        highlightthickness=1, highlightbackground="#33334D",
+                        highlightcolor="#4A6A9E")
+search_entry.pack(side="left", expand=True, fill="x", ipady=3)
+
+def do_search():
+    kw = search_entry.get().strip()
+    if not kw:
+        return
+    state["mode"] = "search"
+    state["keyword"] = kw
+    state["page"] = 0
+    date_label.config(text=f"搜索：{kw}")
+    load_page()
+
+def clear_search():
+    state["mode"] = "date"
+    state["keyword"] = ""
+    state["page"] = 0
+    search_entry.delete(0, "end")
+    date_label.config(text=f"正在看：{state['date']}")
+    load_page()
+
+search_btn = tk.Button(search_frame, text="搜索", command=do_search,
+                       bg="#26263A", fg=TEXT_WHITE, relief="flat",
+                       font=("Microsoft YaHei", 9), activebackground=ACTIVE_BG,
+                       borderwidth=0, highlightthickness=0)
+search_btn.pack(side="left", padx=(4, 0), ipady=1)
+
+clear_btn = tk.Button(search_frame, text="清除", command=clear_search,
+                      bg="#26263A", fg=TEXT_GRAY, relief="flat",
+                      font=("Microsoft YaHei", 9), activebackground=ACTIVE_BG,
+                      borderwidth=0, highlightthickness=0)
+clear_btn.pack(side="left", padx=(2, 0), ipady=1)
+
+search_entry.bind("<Return>", lambda e: do_search())
+
+# ---------- 游戏列表（Canvas，像素截断 + 来源标签） ----------
 list_canvas = tk.Canvas(root, bg="#1A1A2A", highlightthickness=0, bd=0)
 list_canvas.pack(fill="both", expand=True, padx=10, pady=6)
 
@@ -195,6 +265,16 @@ row_urls = {}
 sel_index = -1
 cur_rows = []
 cur_base = 0
+
+name_font = tkfont.Font(family="Microsoft YaHei", size=11)
+
+def fit_name(text, max_px):
+    """按像素宽度截断，长名不会顶到价格区"""
+    if name_font.measure(text) <= max_px:
+        return text
+    while text and name_font.measure(text + "…") > max_px:
+        text = text[:-1]
+    return text + "…"
 
 def draw_list():
     global sel_index
@@ -205,24 +285,35 @@ def draw_list():
         cw = WIN_W - 20
     ch = list_canvas.winfo_height()
     if not cur_rows:
-        msg = "（这一天还没有收录的游戏）"
-        if state["date"] == "":
+        if state["mode"] == "search":
+            msg = "没有找到相关游戏"
+        elif state["date"] == "":
             msg = "数据下载中，请稍候…"
+        else:
+            msg = "（这一天还没有收录的游戏）"
         list_canvas.create_text(cw // 2, ch // 2, text=msg,
                                 fill=TEXT_GRAY, font=("Microsoft YaHei", 11))
         return
-    for i, (name, price, url) in enumerate(cur_rows):
+    name_max = cw - 96 - 8 - 75      # 给价格预留 75px
+    for i, (name, price, url, source) in enumerate(cur_rows):
         y0 = i * ROW_H
         y1 = y0 + ROW_H
         if i == sel_index:
             list_canvas.create_rectangle(2, y0 + 2, cw - 2, y1 - 2,
                                          fill="#2A2A40", outline="")
-        short = name if len(name) <= 20 else name[:20] + "…"
         list_canvas.create_text(10, y0 + ROW_H // 2, anchor="w",
-                                text=f"{cur_base + i + 1}. {short}",
-                                fill=TEXT_WHITE, font=("Microsoft YaHei", 11))
+                                text=f"{cur_base + i + 1}. ",
+                                fill=TEXT_GRAY, font=("Microsoft YaHei", 10))
+        tag = f"[{SOURCE_NAMES.get(source, source)}]"
+        tag_color = SOURCE_COLORS.get(source, TEXT_GRAY)
+        list_canvas.create_text(40, y0 + ROW_H // 2, anchor="w",
+                                text=tag, fill=tag_color,
+                                font=("Microsoft YaHei", 10, "bold"))
+        list_canvas.create_text(96, y0 + ROW_H // 2, anchor="w",
+                                text=fit_name(name, name_max), fill=TEXT_WHITE,
+                                font=("Microsoft YaHei", 11))
         p = str(price).strip()
-        p_color = PRICE_GREEN if p and p != "免费" else TEXT_GRAY
+        p_color = PRICE_GREEN if p and p not in ("免费", "—", "未定价") else TEXT_GRAY
         list_canvas.create_text(cw - 10, y0 + ROW_H // 2, anchor="e",
                                 text=p, fill=p_color,
                                 font=("Microsoft YaHei", 11, "bold"))
@@ -253,24 +344,39 @@ def load_page():
     global sel_index, cur_rows, cur_base
     sel_index = -1
     cur_rows = []
-    d = state["date"]
     conn = sqlite3.connect(DB_PATH, timeout=10)
     try:
-        total = conn.execute("SELECT COUNT(*) FROM games WHERE date = ?",
-                             (d,)).fetchone()[0]
+        if state["mode"] == "search":
+            kw = state["keyword"].replace("%", "\\%").replace("_", "\\_")
+            like = f"%{kw}%"
+            total = conn.execute(
+                "SELECT COUNT(*) FROM games WHERE name LIKE ? ESCAPE '\\'",
+                (like,)).fetchone()[0]
+        else:
+            d = state["date"]
+            total = conn.execute("SELECT COUNT(*) FROM games WHERE date = ?",
+                                 (d,)).fetchone()[0]
+        state["total_pages"] = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+        if state["page"] >= state["total_pages"]:
+            state["page"] = state["total_pages"] - 1
+        if state["mode"] == "search":
+            rows = conn.execute(
+                "SELECT name, price, url, source FROM games WHERE name LIKE ? ESCAPE '\\' "
+                "ORDER BY rank LIMIT ? OFFSET ?",
+                (like, PAGE_SIZE, state["page"] * PAGE_SIZE)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT name, price, url, source FROM games WHERE date = ? "
+                "ORDER BY rank LIMIT ? OFFSET ?",
+                (d, PAGE_SIZE, state["page"] * PAGE_SIZE)).fetchall()
     except sqlite3.OperationalError:
         list_canvas.delete("all")
         page_label.config(text="…")
         conn.close()
         state["date"] = ""
+        state["mode"] = "date"
         draw_list()
         return
-    state["total_pages"] = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-    if state["page"] >= state["total_pages"]:
-        state["page"] = state["total_pages"] - 1
-    rows = conn.execute(
-        "SELECT name, price, url FROM games WHERE date = ? ORDER BY rank LIMIT ? OFFSET ?",
-        (d, PAGE_SIZE, state["page"] * PAGE_SIZE)).fetchall()
     conn.close()
 
     cur_base = state["page"] * PAGE_SIZE
@@ -396,6 +502,8 @@ def open_calendar():
              font=("Microsoft YaHei", 8)).pack(pady=(0, 6))
 
     def pick_date(y, m, d):
+        state["mode"] = "date"
+        state["keyword"] = ""
         state["date"] = f"{y}-{str(m).zfill(2)}-{str(d).zfill(2)}"
         state["page"] = 0
         date_label.config(text=f"正在看：{state['date']}")
