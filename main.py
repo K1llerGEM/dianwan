@@ -1,35 +1,80 @@
+import re
+import time
+import sqlite3
+from datetime import datetime
 import requests
 import urllib3
 from bs4 import BeautifulSoup
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-url = "https://store.steampowered.com/search/results/?filter=newreleases&sort_by=Released_DESC&cc=cn&l=schinese&count=10&format=json"
-resp = requests.get(url, verify=False)
+BASE_URL = ("https://store.steampowered.com/search/results/?filter=popularnew"
+            "&cc=cn&l=schinese&count=25&format=json&start={start}")
+MAX_GAMES = 300          # 想抓更多就调大这个数（“无限”的旋钮）
+STEP = 25
 
-# 把整个网页交给 BeautifulSoup，整理成"可以查的结构"
-soup = BeautifulSoup(resp.text, "html.parser")
+def fetch_page(start):
+    resp = requests.get(BASE_URL.format(start=start), verify=False, timeout=20)
+    soup = BeautifulSoup(resp.text, "html.parser")
+    return soup.select("a.search_result_row")
 
-# 找到所有游戏卡片（search_result_row = 一张游戏卡片）
-games = soup.select("a.search_result_row")
+def parse_date(text):
+    nums = re.findall(r"\d+", text)
+    if len(nums) >= 3:
+        return f"{nums[0]}-{nums[1].zfill(2)}-{nums[2].zfill(2)}"
+    return None
 
-for g in games:
-    name = g.select_one(".title")
-    date = g.select_one(".search_released")
+def weekday_of(date_str):
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").weekday()   # 周一=0 … 周日=6
+    except Exception:
+        return -1
 
-    # 价格部分（上一轮新改的）：
-    # 找价格格子时，老名字和新名字都试
-    price = g.select_one(".search_price, .search_price_discount_combined")
+def update_data():
+    conn = sqlite3.connect("games.db", timeout=10)
+    conn.execute("DROP TABLE IF EXISTS games")
+    conn.execute("CREATE TABLE games (name TEXT, date TEXT, price TEXT, url TEXT, rank INTEGER, week INTEGER)")
+    conn.execute("DELETE FROM games")        # 每次全量刷新，热门榜保持最新
 
-    if price:
-        # 优先取"最终价"，没有就整块文字（比如"免费"）
-        final = price.select_one(".discount_final_price")
-        price_text = final.text.strip() if final else price.text.strip()
-    else:
-        price_text = "?"
+    rank = 0
+    seen = set()
+    start = 0
+    while rank < MAX_GAMES and start <= MAX_GAMES:
+        rows = fetch_page(start)
+        if not rows:
+            break
+        for g in rows:
+            name_el = g.select_one(".title")
+            if name_el is None:
+                continue
+            name_text = name_el.text.strip()
+            if "Demo" in name_text or name_text in seen:
+                continue
+            seen.add(name_text)
 
-    print("游戏名:", name.text.strip() if name else "?")
-    print("日期:", date.text.strip() if date else "?")
-    print("价格:", price_text)
-    print("链接:", g.get("href"))
-    print("-" * 40)
+            date_text = ""
+            date_el = g.select_one(".search_released")
+            if date_el:
+                d = parse_date(date_el.text.strip())
+                date_text = d if d else date_el.text.strip()
+
+            price_el = g.select_one(".search_price, .search_price_discount_combined")
+            price_text = "?"
+            if price_el:
+                final = price_el.select_one(".discount_final_price")
+                price_text = final.text.strip() if final else price_el.text.strip().replace("\n", " ").strip()
+            url_text = g.get("href") or ""
+
+            rank += 1
+            week = weekday_of(date_text)
+            conn.execute("INSERT INTO games VALUES (?, ?, ?, ?, ?, ?)",
+                         (name_text, date_text, price_text, url_text, rank, week))
+        start += STEP
+        time.sleep(0.5)      # 礼貌抓取，防止被 Steam 限流
+
+    conn.commit()
+    conn.close()
+    print(f"更新完成，共 {rank} 款游戏（按热门排序）")
+
+if __name__ == "__main__":
+    update_data()
